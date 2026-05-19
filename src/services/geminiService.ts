@@ -16,7 +16,14 @@ export interface Project {
   grounding_sources?: { title: string; uri: string }[];
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const ai = new GoogleGenAI({ 
+  apiKey: process.env.GEMINI_API_KEY || "",
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    }
+  }
+});
 
 export async function searchIndustrialProjects(
   keyword: string,
@@ -24,31 +31,43 @@ export async function searchIndustrialProjects(
   region: string,
   dateLimit: string = "all"
 ): Promise<Project[]> {
-  const prompt = `Perform an intensive search for real industrial projects, infrastructure news, and official corporate announcements in Brazil based on:
-Keyword: "${keyword}"
-Segment: "${segment || 'any'}"
-Region: "${region || 'all Brazil'}" (Norte, Nordeste, Sul, Sudeste, Centro-Oeste)
-Time Range Limit: "${dateLimit}"
-Current Date: ${new Date().toISOString()}
+  const prompt = `Goal: Identify and synthesize a list of industrial projects, infrastructure news, and investment opportunities in BRAZIL.
 
-ENGINEERING SEARCH PROTOCOL:
-1. INTENSIVE DEEP SCAN: Scrape, synthesize, and cross-reference information from official press releases (Petrobras, Vale, Gerdau, WEG, Suzano, Klabin, etc.), specialized industrial portals (Petronotícias, Click Petróleo e Gás, CanalEnergia, Infomoney, Valor Econômico), and government bidding sites (Comprasnet, Petronect, Portal da Transparência).
-2. EXHAUSTIVE VOLUME: You MUST return a high volume of distinct, real-world projects (aim for 40+ opportunities if available). Prioritize comprehensive coverage of the industrial landscape over speed.
-3. SOURCE VERIFICATION: Every single project MUST have a functional, direct URL in "url" and "source_url". Prefer direct links to tender documents, company newsroom articles, or specialized news reports.
-4. TECHNICAL RIGOR: The "summary" MUST be a professional technical analysis (min 6 sentences) detailing:
-   - Specific nature (Greenfield, Brownfield, Maintenance, EPC).
-   - Detailed technical scope and critical vendor requirements.
-   - Strategic impact on the regional economy.
-   - Estimated timeline, budget (if available), and regulatory context (IBAMA, state licenses).
-   - Risk Assessment: Challenges like logistical hurdles or financial volatility.
-5. GEOGRAPHY: Results MUST strictly reside within the states of the requested region: ${region}. If "all Brazil", provide a balanced nationwide overview.
-6. NEWS EXTRACTION: Include recent news articles, reports, and official announcements as individual items if they represent a project milestone or new investment opportunity.
+SPECIFIC PARAMETERS:
+- Keyword: "${keyword}"
+- Segment: "${segment || 'Industrial/Infrastructure'}"
+- Region: "${region || 'all Brazil'}" (Focus specifically on: ${region || 'Across Brazil'})
+- Timeframe Limit: "${dateLimit}"
+- Reference Date: ${new Date().toISOString()}
 
-Return a valid JSON array of project objects. Ensure "priority_score" strictly reflects the immediate commercial opportunity.`;
+SEARCH STRATEGY:
+1. GENERATE SPECIFIC QUERIES: Use the Google Search tool with multiple targeted queries. For example, if searching for "Petrobras", use queries like:
+   - "Petrobras novos projetos licitação ${region || ''}"
+   - "Petrobras investimentos infraestrutura notícias recentes"
+   - "Petronect editais abertos Petrobras"
+   
+2. SCAN MULTIPLE SOURCES:
+   - Official Newsrooms (Vale, Petrobras, Gerdau, WEG, Suzano, Klabin, etc.)
+   - Specialized Industry News (Petronotícias, Click Petróleo e Gás, CanalEnergia, Infomoney, Valor Econômico, Exame, G1 Economia)
+   - Bidding Portals (Comprasnet, Petronect, Portal da Transparência)
+
+3. TARGETS:
+   - Greenfield (new developments) and Brownfield (expansions).
+   - Maintenance shutdowns (paradas de manutenção), EPC contracts, and major supply tenders.
+   - News about MOUs, funding rounds for industrial startups, or new factory installations.
+
+REQUIREMENTS:
+- Return as many distinct, real-world opportunities as possible (aim for 20+).
+- "summary": A professional technical description (3-5 sentences) detailing scope, current status, and strategic impact.
+- "url" and "source_url": MUST be functional, direct links.
+- "priority_score": 0-100 score (high = immediate action needed or active tender).
+- "location": City and State (e.g., "Macaé, RJ").
+
+Ensure the response is a valid JSON array of objects following the defined schema.`;
 
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-3-flash-preview", 
       contents: prompt,
       config: {
         tools: [{ googleSearch: {} }],
@@ -62,40 +81,51 @@ Return a valid JSON array of project objects. Ensure "priority_score" strictly r
               company: { type: Type.STRING },
               project_type: { 
                 type: Type.STRING,
-                description: "e.g., notícia, expansão, licitação, manutenção, projeto novo, EPC"
+                description: "e.g., notícia, expansão, licitação, manutenção, projeto novo, EPC, investimento"
               },
               priority_score: { type: Type.NUMBER },
-              estimated_value: { type: Type.NUMBER, description: "Value in BRL" },
+              estimated_value: { type: Type.NUMBER, description: "Estimated value in BRL, 0 if unknown" },
               summary: { type: Type.STRING },
               url: { type: Type.STRING },
               source_url: { type: Type.STRING },
               source: { type: Type.STRING },
-              status: { type: Type.STRING, description: "e.g., em análise, licitação aberta, obra iniciada" },
+              status: { type: Type.STRING, description: "anunciado, em licitação, em obras, planejado, concluído" },
               location: { type: Type.STRING },
-              created_at: { type: Type.STRING, description: "ISO 8601 date string of when the project was announced or discovered" }
+              created_at: { type: Type.STRING, description: "ISO 8601 date string" }
             },
-            required: ["title", "company", "project_type", "priority_score", "summary", "created_at"]
+            required: ["title", "company", "project_type", "priority_score", "summary", "created_at", "location"]
           }
         }
       }
     });
 
-    const text = response.text;
-    if (!text) return [];
+    const candidate = response.candidates?.[0];
+    const text = candidate?.content?.parts?.find(p => p.text)?.text;
     
-    const projects: Project[] = JSON.parse(text);
+    if (!text) {
+      console.warn("No text returned from Gemini");
+      return [];
+    }
+    
+    let projects: Project[] = [];
+    try {
+      projects = JSON.parse(text);
+    } catch (e) {
+      console.error("Failed to parse JSON from Gemini:", text);
+      return [];
+    }
 
-    // Extract grounding sources if available
-    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
-    const sources = chunks?.filter(c => c.web).map(c => ({
-      title: c.web?.title || 'Fonte Web',
-      uri: c.web?.uri || ''
-    })).filter(s => s.uri) || [];
+    // Extract grounding sources
+    const sources = candidate?.groundingMetadata?.groundingChunks
+      ?.filter(c => c.web)
+      .map(c => ({
+        title: c.web?.title || 'Fonte Web',
+        uri: c.web?.uri || ''
+      })).filter(s => s.uri) || [];
 
-    // Attach general sources to projects that might be missing them or just as extra verification
     return projects.map(p => ({
       ...p,
-      grounding_sources: sources.slice(0, 5) // Attach first 5 general sources as relevant verification
+      grounding_sources: sources.slice(0, 5)
     }));
   } catch (error) {
     console.error("Gemini Error:", error);

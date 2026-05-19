@@ -122,6 +122,15 @@ export default function App() {
     setLoading(false);
   };
 
+  const handleTriggerSearch = async (newSearch: typeof search) => {
+    if (!newSearch.keyword.trim()) return;
+    setLoading(true);
+    setActiveTab('results');
+    const results = await searchIndustrialProjects(newSearch.keyword, newSearch.segment, newSearch.region, newSearch.dateLimit);
+    setProjects(results);
+    setLoading(false);
+  };
+
   const formatCurrency = (value: number) => {
     if (!value || value === 0) return 'Sob consulta';
     if (value >= 1000000) return `R$ ${(value / 1000000).toFixed(1)}M`;
@@ -289,7 +298,11 @@ export default function App() {
                           {['Projetos', 'Notícias', 'Investimento', 'Anunciou', 'Licitação', 'Expansão', 'EPC', 'Parada de Manutenção', 'Novo Edital', 'Corporate News', 'Petrobras News', 'Vale Updates'].map((term) => (
                             <button
                               key={term}
-                              onClick={() => setSearch({ ...search, keyword: term })}
+                              onClick={() => {
+                                const newSearch = { ...search, keyword: term };
+                                setSearch(newSearch);
+                                handleTriggerSearch(newSearch);
+                              }}
                               className="text-[9px] font-mono uppercase bg-slate-900 border border-radar-line px-2 py-1 rounded text-slate-500 hover:border-radar-accent hover:text-radar-accent transition-colors"
                             >
                               + {term}
