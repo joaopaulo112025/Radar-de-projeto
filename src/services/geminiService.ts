@@ -25,6 +25,10 @@ const ai = new GoogleGenAI({
   }
 });
 
+async function delay(ms: number) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 export async function searchIndustrialProjects(
   keyword: string,
   segment: string,
@@ -65,70 +69,84 @@ REQUIREMENTS:
 
 Ensure the response is a valid JSON array of objects following the defined schema.`;
 
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview", 
-      contents: prompt,
-      config: {
-        tools: [{ googleSearch: {} }],
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING },
-              company: { type: Type.STRING },
-              project_type: { 
-                type: Type.STRING,
-                description: "e.g., notícia, expansão, licitação, manutenção, projeto novo, EPC, investimento"
+  let lastError: any = null;
+  const maxRetries = 3;
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview", 
+        contents: prompt,
+        config: {
+          tools: [{ googleSearch: {} }],
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                company: { type: Type.STRING },
+                project_type: { 
+                  type: Type.STRING,
+                  description: "e.g., notícia, expansão, licitação, manutenção, projeto novo, EPC, investimento"
+                },
+                priority_score: { type: Type.NUMBER },
+                estimated_value: { type: Type.NUMBER, description: "Estimated value in BRL, 0 if unknown" },
+                summary: { type: Type.STRING },
+                url: { type: Type.STRING },
+                source_url: { type: Type.STRING },
+                source: { type: Type.STRING },
+                status: { type: Type.STRING, description: "anunciado, em licitação, em obras, planejado, concluído" },
+                location: { type: Type.STRING },
+                created_at: { type: Type.STRING, description: "ISO 8601 date string" }
               },
-              priority_score: { type: Type.NUMBER },
-              estimated_value: { type: Type.NUMBER, description: "Estimated value in BRL, 0 if unknown" },
-              summary: { type: Type.STRING },
-              url: { type: Type.STRING },
-              source_url: { type: Type.STRING },
-              source: { type: Type.STRING },
-              status: { type: Type.STRING, description: "anunciado, em licitação, em obras, planejado, concluído" },
-              location: { type: Type.STRING },
-              created_at: { type: Type.STRING, description: "ISO 8601 date string" }
-            },
-            required: ["title", "company", "project_type", "priority_score", "summary", "created_at", "location"]
+              required: ["title", "company", "project_type", "priority_score", "summary", "created_at", "location"]
+            }
           }
         }
+      });
+
+      const candidate = response.candidates?.[0];
+      const text = candidate?.content?.parts?.find(p => p.text)?.text;
+      
+      if (!text) {
+        throw new Error("No text returned from Gemini");
       }
-    });
+      
+      let projects: Project[] = JSON.parse(text);
 
-    const candidate = response.candidates?.[0];
-    const text = candidate?.content?.parts?.find(p => p.text)?.text;
-    
-    if (!text) {
-      console.warn("No text returned from Gemini");
-      return [];
+      const sources = candidate?.groundingMetadata?.groundingChunks
+        ?.filter(c => c.web)
+        .map(c => ({
+          title: c.web?.title || 'Fonte Web',
+          uri: c.web?.uri || ''
+        })).filter(s => s.uri) || [];
+
+      return projects.map(p => ({
+        ...p,
+        grounding_sources: sources.slice(0, 5)
+      }));
+
+    } catch (error: any) {
+      lastError = error;
+      const status = error?.status || error?.error?.status;
+      
+      console.warn(`Gemini Attempt ${attempt + 1} failed:`, status || error.message);
+
+      // If it's a 429 or 500, wait and retry
+      if (status === 'RESOURCE_EXHAUSTED' || status === 'INTERNAL' || error?.code === 429 || error?.code === 500) {
+        const waitTime = Math.pow(2, attempt) * 2000; // 2s, 4s, 8s backoff
+        await delay(waitTime);
+        continue;
+      }
+      
+      // For other errors (like 404), break and return empty
+      break;
     }
-    
-    let projects: Project[] = [];
-    try {
-      projects = JSON.parse(text);
-    } catch (e) {
-      console.error("Failed to parse JSON from Gemini:", text);
-      return [];
-    }
-
-    // Extract grounding sources
-    const sources = candidate?.groundingMetadata?.groundingChunks
-      ?.filter(c => c.web)
-      .map(c => ({
-        title: c.web?.title || 'Fonte Web',
-        uri: c.web?.uri || ''
-      })).filter(s => s.uri) || [];
-
-    return projects.map(p => ({
-      ...p,
-      grounding_sources: sources.slice(0, 5)
-    }));
-  } catch (error) {
-    console.error("Gemini Error:", error);
-    return [];
   }
+
+  console.error("Gemini Final Error after retries:", lastError);
+  return [];
 }
+
